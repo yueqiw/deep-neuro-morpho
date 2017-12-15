@@ -77,8 +77,16 @@ parser.add_argument('--sparse', dest='sparse', action='store_true')
 parser.add_argument('--nosparse', dest='sparse', action='store_false')
 parser.set_defaults(sparse=False)
 
+parser.add_argument('--rgb', dest='rgb', action='store_true')
+parser.add_argument('--no-rgb', dest='rgb', action='store_false')
+parser.set_defaults(rgb=True)
+
 parser.add_argument('--imagenet', dest='imagenet', action='store_true')
 parser.set_defaults(imagenet=False)
+
+parser.add_argument('--weight-class', dest='weight_class', action='store_true')
+parser.add_argument('--no-weight-class', dest='weight_class', action='store_false')
+parser.set_defaults(weight_class=True)
 
 best_prec1 = 0
 
@@ -93,6 +101,7 @@ def main():
 
     dir_name = args.name + '_' + args.dataset + '_' + 'topcls-' + str(args.topn_class) + \
                 '_' + args.model + '_' + 'arg-' + str(args.augment) + \
+                '_wtclass-' + str(args.weight_class) + \
                 '_drop-' + str(args.droprate) + '_lr' + str(args.lr) + \
                 '_decay-' + str(args.decay_every) + '-' + str(args.lr_decay) + \
                 '_' + today
@@ -112,12 +121,12 @@ def main():
     else:
         raise ValueError('Unknown dataset.')
 
-    classes = np.arange(args.topn_class)
+    classes = np.arange(args.topn_class)  # [0,1,...,5]
     metadata = pd.read_pickle('../data/rodent_3d_dendrites_br-ct-filter-3_all_mainclasses_use_filter.pkl')
     metadata = metadata[metadata['label1_id'].isin(classes)]
     neuron_ids = metadata['neuron_id'].values
-    labels = metadata['label1_id'].values
-
+    labels = metadata['label1_id'].values  # contain the same set of values as classes
+    unique, counts = np.unique(labels, return_counts=True)
 
     if args.imagenet == True:
         normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
@@ -152,17 +161,17 @@ def main():
     kwargs = {'num_workers': 1, 'pin_memory': True}
     train_loader = torch.utils.data.DataLoader(
         NeuroMorpho(root_dir, data_dir, train_ids, train_y, img_size=256,
-                         transform=transform_train, rgb=args.imagenet),
+                         transform=transform_train, rgb=args.rgb),
         batch_size=args.batch_size, shuffle=True, **kwargs)
 
     val_loader = torch.utils.data.DataLoader(
         NeuroMorpho(root_dir, data_dir, val_ids, val_y, img_size=256,
-                         transform=transform_test, rgb=args.imagenet),
+                         transform=transform_test, rgb=args.rgb),
         batch_size=args.batch_size, shuffle=True, **kwargs)
 
     test_loader = torch.utils.data.DataLoader(
         NeuroMorpho(root_dir, data_dir, test_ids, test_y, img_size=256,
-                         transform=transform_test, rgb=args.imagenet),
+                         transform=transform_test, rgb=args.rgb),
         batch_size=args.batch_size, shuffle=True, **kwargs)
 
 
@@ -187,8 +196,13 @@ def main():
     if use_gpu:
         model = model.cuda()
 
-
-    criterion = nn.CrossEntropyLoss().cuda()
+    if args.weight_class is True:
+        weight_dict = dict(zip(unique, counts.max() / counts.astype('float')))
+        print("Class Weight: " + " ".join(['%d: %.2f' % (k,v) for k, v in weight_dict.items()]))
+        weight_tensor = torch.FloatTensor([weight_dict[i] for i in classes])
+        criterion = nn.CrossEntropyLoss(weight=weight_tensor).cuda()
+    else:
+        criterion = nn.CrossEntropyLoss().cuda()
     # TODO: add weight for imbalanced classes
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr,
                                 weight_decay=args.weight_decay)
@@ -199,15 +213,15 @@ def main():
         t_before_epoch = time.time()
         lr = adjust_learning_rate(optimizer, lr, epoch, args.lr_decay, args.decay_every)
 
-        train_loss, train_acc, train_acc_each = \
+        train_loss, train_acc_all, train_acc_average, train_acc_each = \
                 train(train_loader, model, criterion, optimizer, epoch, classes)
 
         # evaluate on validation set
-        val_loss, val_acc, val_acc_each = validate(val_loader, model, criterion, epoch, classes)
+        val_loss, val_acc_all, val_acc_average, val_acc_each = validate(val_loader, model, criterion, epoch, classes)
 
         # remember best prec@1 and save checkpoint
-        is_best = val_acc > best_prec1
-        best_prec1 = max(val_acc, best_prec1)
+        is_best = val_acc_average > best_prec1
+        best_prec1 = max(val_acc_average, best_prec1)
         save_checkpoint({
             'epoch': epoch + 1,
             'state_dict': model.state_dict(),
@@ -215,9 +229,11 @@ def main():
         }, is_best, dir_name)
         if args.tensorboard:
             log_value('train_loss', train_loss, epoch)
-            log_value('train_acc', train_acc, epoch)
+            log_value('train_acc_all', train_acc_all, epoch)
+            log_value('train_acc_average', train_acc_average, epoch)
             log_value('val_loss', val_loss, epoch)
-            log_value('val_acc', val_acc, epoch)
+            log_value('val_acc_all', val_acc_all, epoch)
+            log_value('val_acc_average', val_acc_average, epoch)
             for k in classes:
                 log_value('train_acc_%d' % k, train_acc_each[k], epoch)
                 log_value('val_acc_%d' % k, val_acc_each[k], epoch)
@@ -227,7 +243,8 @@ def train(train_loader, model, criterion, optimizer, epoch, classes):
     """Train for one epoch on the training set"""
     batch_time = AverageMeter()
     losses = AverageMeter()
-    top1 = AverageMeter()
+    top1_all = AverageMeter()
+    top1_average = AverageMeter()
     batch_time = AverageMeter()
 
     top1_each = {i: AverageMeter() for i in  np.arange(args.topn_class)}
@@ -247,12 +264,13 @@ def train(train_loader, model, criterion, optimizer, epoch, classes):
         output = model(input)
 
         loss = criterion(output, target_var)
-        prec1 = accuracy(output.data, target, topk=(1,))[0]
-        prec1_each = [x[0] for x in accuracy_multi(output.data, target, classes, topk=(1,))]
+        prec1_all = accuracy(output.data, target, topk=(1,))[0]
+        prec1_each = {c:v[0][0] for c, v in accuracy_multi(output.data, target, classes, topk=(1,)).items()}
+
         losses.update(loss.data[0], input.size(0))
-        top1.update(prec1[0], input.size(0))
+        top1_all.update(prec1_all[0], input.size(0))
         for k in top1_each:
-            top1_each[k].update(prec1_each[k][0], torch.sum(target==k))
+            top1_each[k].update(prec1_each[k], torch.sum(target==k))
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
@@ -268,23 +286,25 @@ def train(train_loader, model, criterion, optimizer, epoch, classes):
                 print('Train: [{0}-{1:0>3}]\t'
                      'Time {batch_time.val:.2g}\t'
                       'Loss {loss.val:.4g} ({loss.avg:.4f})\t'
-                      'Acc: {top1.val:.4g} ({top1.avg:.4f})\t'\
+                      'Acc (all): {top1_all.val:.4g} ({top1_all.avg:.4f})\t'\
                       .format(epoch, i, \
                       batch_time=batch_time, loss=losses, \
-                      top1=top1))
+                      top1_all=top1_all, top1_average=top1_average))
         del output, loss
 
     top1_each = [top1_each[x].avg for x in top1_each]
-    print('\n * Train Error: {loss.avg:.4g}\tTrain Acc: {top1.avg:.4g}'\
-            .format(loss=losses, top1=top1))
+    top1_average = np.mean(top1_each)
+    print('\n * Train Error: {loss.avg:.4g}\tTrain Acc (all): {top1_all.avg:.4g}\tTrain Acc (average): {top1_average:.4g}'\
+            .format(loss=losses, top1_all=top1_all, top1_average=top1_average))
     print(pd.DataFrame({'class':classes, 'acc':top1_each}).T)
-    return losses.avg, top1.avg, top1_each
+    return losses.avg, top1_all.avg, top1_average, top1_each
 
 def validate(val_loader, model, criterion, epoch, classes):
     """Train for one epoch on the training set"""
     batch_time = AverageMeter()
     losses = AverageMeter()
-    top1 = AverageMeter()
+    top1_all = AverageMeter()
+    top1_average = AverageMeter()
     batch_time = AverageMeter()
 
     top1_each = {i: AverageMeter() for i in  np.arange(args.topn_class)}
@@ -301,13 +321,13 @@ def validate(val_loader, model, criterion, epoch, classes):
         output = model(input)
 
         loss = criterion(output, target_var)
-        prec1 = accuracy(output.data, target, topk=(1,), )[0]
-        prec1_each = [x[0] for x in accuracy_multi(output.data, target, classes, topk=(1,))]
+        prec1_all  = accuracy(output.data, target, topk=(1,))[0]
+        prec1_each = {c:v[0][0] for c, v in accuracy_multi(output.data, target, classes, topk=(1,)).items()}
 
         losses.update(loss.data[0], input.size(0))
-        top1.update(prec1[0], input.size(0))
+        top1_all.update(prec1_all[0], input.size(0))
         for k in top1_each:
-            top1_each[k].update(prec1_each[k][0], torch.sum(target==k))
+            top1_each[k].update(prec1_each[k], torch.sum(target==k))
 
         # measure elapsed time
         batch_time.update(time.time() - t)
@@ -318,17 +338,18 @@ def validate(val_loader, model, criterion, epoch, classes):
                 print('Val: [{0}-{1:0>3}]\t'
                      'Time {batch_time.val:.2g}\t'
                       'Loss {loss.val:.4g} ({loss.avg:.4f})\t'
-                      'Acc: {top1.val:.4g} ({top1.avg:.4f})\t'\
+                      'Acc (all): {top1_all.val:.4g} ({top1_all.avg:.4f})\t'\
                       .format(epoch, i, \
                       batch_time=batch_time, loss=losses, \
-                      top1=top1))
+                      top1_all=top1_all))
         del output, loss
 
     top1_each = [top1_each[x].avg for x in top1_each]
-    print('\n * Val Error: {loss.avg:.4g}\tVal Acc: {top1.avg:.4g}'\
-            .format(loss=losses, top1=top1))
+    top1_average = np.mean(top1_each)
+    print('\n * Val Error: {loss.avg:.4g}\tVal Acc (all): {top1_all.avg:.4g}\tVal Acc (class average): {top1_average:.4g}'\
+            .format(loss=losses, top1_all=top1_all, top1_average=top1_average))
     print(pd.DataFrame({'class':classes, 'acc':top1_each}).T)
-    return losses.avg, top1.avg, top1_each
+    return losses.avg, top1_all.avg, top1_average, top1_each
 
 
 def accuracy(output, target, topk=(1,)):
@@ -355,7 +376,7 @@ def accuracy_multi(output, target, classes, topk=(1,)):
     _, pred = output.topk(maxk, 1, True, True)
     pred = pred.t()
     correct = pred.eq(target.view(1, -1).expand_as(pred))
-    res_all = []
+    res_all = dict()
 
     for c in classes:
         res = []
@@ -366,7 +387,7 @@ def accuracy_multi(output, target, classes, topk=(1,)):
                 res.append(correct_k.mul_(100.0 / torch.sum(target==c)))
         else:
             res.append([None])
-        res_all.append(res)
+        res_all[c] = res
     return res_all
 
 
