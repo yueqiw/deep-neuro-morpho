@@ -39,7 +39,7 @@ print('GPU: ' + str(use_gpu))
 parser = argparse.ArgumentParser(description='Deep Neuro Morphology')
 parser.add_argument('--dataset', default='rodent_256_scale', type=str,
                     help='dataset')
-parser.add_argument('--model', default='resnet18', type=str,
+parser.add_argument('--model', default='', type=str,
                     help='model')
 parser.add_argument('--epochs', default=10, type=int,
                     help='number of total epochs to run')
@@ -57,8 +57,15 @@ parser.add_argument('--print-freq', '-p', default=10, type=int,
                     help='print frequency (default: 10)')
 parser.add_argument('--droprate', default=0, type=float,
                     help='dropout probability (default: 0.0)')
-parser.add_argument('--resume', default='', type=str,
-                    help='path to latest checkpoint (default: none)')
+parser.add_argument('--resume', dest='resume', action='store_true',
+                    help='Resume training from previously trained model')
+parser.set_defaults(resume=False)
+parser.add_argument('--test', dest='test', action='store_true',
+                    help='Test')
+parser.set_defaults(test=False)
+
+parser.add_argument('--trained-model', default='', type=str,
+                    help='path to model checkpoint (default: '')')
 parser.add_argument('--name', default='', type=str,
                     help='name of experiment')
 parser.add_argument('--tensorboard',
@@ -67,7 +74,7 @@ parser.add_argument('--lr-decay', default=0.5, type=float,
                     help='learning rate decay rate')
 parser.add_argument('--decay-every', default=5, type=int,
                     help='decay learning rate every several epochs')
-parser.add_argument('--topn-class', default=7, type=int,
+parser.add_argument('--topn-class', default=6, type=int,
                     help='use top n popular classes for learning')
 parser.add_argument('--augment', dest='augment', action='store_true',
                     help='whether to use standard augmentation (default: False)')
@@ -84,9 +91,10 @@ parser.set_defaults(rgb=True)
 parser.add_argument('--imagenet', dest='imagenet', action='store_true')
 parser.set_defaults(imagenet=False)
 
-parser.add_argument('--weight-class', dest='weight_class', action='store_true')
-parser.add_argument('--no-weight-class', dest='weight_class', action='store_false')
-parser.set_defaults(weight_class=True)
+parser.add_argument('--weight-class-linear', dest='weight_class', action='store_const', const="linear")
+parser.add_argument('--weight-class-log2', dest='weight_class', action='store_const', const="log2")
+parser.add_argument('--no-weight-class', dest='weight_class', action='store_const', const=None)
+parser.set_defaults(weight_class=None)
 
 best_prec1 = 0
 
@@ -99,9 +107,11 @@ def main():
 
     today = datetime.datetime.today().strftime("%Y-%m-%d-%H-%M")
 
+
     dir_name = args.name + '_' + args.dataset + '_' + 'topcls-' + str(args.topn_class) + \
                 '_' + args.model + '_' + 'arg-' + str(args.augment) + \
-                '_wtclass-' + str(args.weight_class) + \
+                '_wtclass-' + str(args.weight_class) + '_imgnetnorm-' + str(args.imagenet) + \
+                '_wtdecay-' + str(args.weight_decay) + \
                 '_drop-' + str(args.droprate) + '_lr' + str(args.lr) + \
                 '_decay-' + str(args.decay_every) + '-' + str(args.lr_decay) + \
                 '_' + today
@@ -110,7 +120,13 @@ def main():
     args_dict['time'] = today
     args_dict['dir_name'] = dir_name
 
-    if args.tensorboard:
+    if args.test:
+        dir_name = args.test
+        with open('../runs/%s/argparse.json'%(args.trained_model), 'r') as f:
+            args_dict = json.load(f)
+        args.model = args_dict['model']
+
+    if args.tensorboard and not args.test:
         configure("../runs/%s"%(dir_name))
         with open('../runs/%s/argparse.json'%(dir_name), 'w') as f:
             json.dump(args_dict, f)
@@ -174,20 +190,70 @@ def main():
                          transform=transform_test, rgb=args.rgb),
         batch_size=args.batch_size, shuffle=True, **kwargs)
 
+    def vgg_classifier_8():
+        classifier = nn.Sequential(
+                nn.Linear(512 * 8 * 8, 4096),
+                nn.ReLU(True),
+                nn.Dropout(),
+                nn.Linear(4096, 4096),
+                nn.ReLU(True),
+                nn.Dropout(),
+                nn.Linear(4096, args.topn_class),
+            )
+        return classifier
 
-    if args.resume == '':
-        if args.model == 'vggplus1':
-            model = VGGplus1(num_classes=args.topn_class)
-        elif args.model == 'resnet18':
-            model = models.resnet18(num_classes=args.topn_class, pretrained=False)
-        elif args.model == 'resnet34':
-            model = models.resnet34(num_classes=args.topn_class, pretrained=False)
-        elif args.model == 'vgg13bn':
-            model = models.vgg13_bn(num_classes=args.topn_class, pretrained=False)
-        else:
-            raise ValueError('Unknown model type.')
+    if args.model == 'vggplus1':
+        model = VGGplus1(num_classes=args.topn_class)
+    elif args.model == 'resnet18':
+        model = models.resnet18(num_classes=args.topn_class, pretrained=False)
+    elif args.model == 'resnet34':
+        model = models.resnet34(num_classes=args.topn_class, pretrained=False)
+    elif args.model == 'vgg13bn':
+        model = models.vgg13_bn(num_classes=args.topn_class, pretrained=False)
+    elif args.model == 'vgg16bn':
+        model = models.vgg16_bn(num_classes=args.topn_class, pretrained=False)
+    elif args.model == 'resnet18_pretrained_tuneall':
+        model = models.resnet18(pretrained=True)
+        model.fc = nn.Linear(512, args.topn_class)  # require_grad=True by default
+    elif args.model == 'resnet34_pretrained_tuneall':
+        model = models.resnet34(pretrained=True)
+        model.fc = nn.Linear(512, args.topn_class)
+    elif args.model == 'resnet18_pretrained_tunelast':
+        model = models.resnet18(pretrained=True)
+        for param in model.parameters():
+            param.requires_grad = False
+        model.fc = nn.Linear(512, args.topn_class)  # require_grad=True by default
+    elif args.model == 'resnet34_pretrained_tunelast':
+        model = models.resnet34(pretrained=True)
+        for param in model.parameters():
+            param.requires_grad = False
+        model.fc = nn.Linear(512, args.topn_class)
+    elif args.model == 'vgg13bn_pretrained_tuneall':
+        model = models.vgg13_bn(pretrained=True)
+        model.classifier = None
+        model.classifier = vgg_classifier_8()
+
+    elif args.model == 'vgg13bn_pretrained_tunelast':
+        # This actually do not work since the input size for the classifier is different.
+        model = models.vgg13_bn(pretrained=True)
+        for param in model.parameters():
+            param.requires_grad = False
+        mod = list(model.classifier.children())
+        _ = mod.pop()
+        mod.append(nn.Linear(4096, args.topn_class))
+        model.classifier = torch.nn.Sequential(*mod)
+    elif args.model == 'vgg13bn_pretrained_tuneclassifier':
+        model = models.vgg13_bn(pretrained=True)
+        for param in model.parameters():
+            param.requires_grad = False
+        model.classifier = vgg_classifier_8()
+    #elif args.model == 'wide_resnet':
+    #    model = WideResNet(14, num_classes)
     else:
-        model = torch.load(args.resume)
+        raise ValueError('Unknown model type.')
+
+    if args.test:
+        model.load_state_dict(torch.load("../runs/%s/model_best.pth.tar" % (args.trained_model))['state_dict'])
 
     # get the number of model parameters
     print('Number of model parameters: {}'.format(
@@ -196,17 +262,46 @@ def main():
     if use_gpu:
         model = model.cuda()
 
-    if args.weight_class is True:
-        weight_dict = dict(zip(unique, counts.max() / counts.astype('float')))
+    if "tunelast" in args.model:
+        if 'vgg' in args.model:
+            optimizer = torch.optim.Adam(list(model.classifier.children())[-1].parameters(), lr=args.lr,
+                                        weight_decay=args.weight_decay)
+        elif 'resnet' in args.model:
+            optimizer = torch.optim.Adam(model.fc.parameters(), lr=args.lr,
+                                        weight_decay=args.weight_decay)
+        else:
+            raise ValueError("Unknown model type for tuning the last layer.")
+    elif "tuneclassifier" in args.model:
+        if 'vgg' in args.model:
+            optimizer = torch.optim.Adam(model.classifier.parameters(), lr=args.lr,
+                                        weight_decay=args.weight_decay)
+        else:
+            raise ValueError("Unknown model type for tuning the classifier.")
+    else:
+        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr,
+                                    weight_decay=args.weight_decay)
+
+
+    if not args.weight_class is None:
+        if args.weight_class == 'linear':
+            weight_dict = dict(zip(unique, counts.max() / counts.astype('float')))
+        elif args.weight_class == 'log2':
+            weight_dict = dict(zip(unique, np.log2(counts.max() / counts.astype('float') + 1)))
+        else:
+            raise ValueError("Unknown class weight method.")
         print("Class Weight: " + " ".join(['%d: %.2f' % (k,v) for k, v in weight_dict.items()]))
         weight_tensor = torch.FloatTensor([weight_dict[i] for i in classes])
         criterion = nn.CrossEntropyLoss(weight=weight_tensor).cuda()
     else:
         criterion = nn.CrossEntropyLoss().cuda()
-    # TODO: add weight for imbalanced classes
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr,
-                                weight_decay=args.weight_decay)
+
     lr = args.lr
+
+    if args.test is True:
+        print("Testing model: " + args.trained_model)
+        val_loss, val_acc_all, val_acc_average, val_acc_each, target_list, pred_list = \
+                validate(test_loader, model, criterion, epoch=0, classes=classes)
+        return  # skip training
 
     for epoch in range(args.epochs):
         print('\nEpoch: {0} '.format(epoch) + '\t lr: ' + '{0:.3g}\n'.format(lr))
@@ -217,7 +312,8 @@ def main():
                 train(train_loader, model, criterion, optimizer, epoch, classes)
 
         # evaluate on validation set
-        val_loss, val_acc_all, val_acc_average, val_acc_each = validate(val_loader, model, criterion, epoch, classes)
+        val_loss, val_acc_all, val_acc_average, val_acc_each, target_list, pred_list = \
+                validate(val_loader, model, criterion, epoch, classes)
 
         # remember best prec@1 and save checkpoint
         is_best = val_acc_average > best_prec1
@@ -246,6 +342,7 @@ def train(train_loader, model, criterion, optimizer, epoch, classes):
     top1_all = AverageMeter()
     top1_average = AverageMeter()
     batch_time = AverageMeter()
+
 
     top1_each = {i: AverageMeter() for i in  np.arange(args.topn_class)}
     # switch to train mode
@@ -294,7 +391,7 @@ def train(train_loader, model, criterion, optimizer, epoch, classes):
 
     top1_each = [top1_each[x].avg for x in top1_each]
     top1_average = np.mean(top1_each)
-    print('\n * Train Error: {loss.avg:.4g}\tTrain Acc (all): {top1_all.avg:.4g}\tTrain Acc (average): {top1_average:.4g}'\
+    print('\n * Train Loss: {loss.avg:.4g}\tTrain Acc (all): {top1_all.avg:.4g}\tTrain Acc (class average): {top1_average:.4g}'\
             .format(loss=losses, top1_all=top1_all, top1_average=top1_average))
     print(pd.DataFrame({'class':classes, 'acc':top1_each}).T)
     return losses.avg, top1_all.avg, top1_average, top1_each
@@ -306,6 +403,8 @@ def validate(val_loader, model, criterion, epoch, classes):
     top1_all = AverageMeter()
     top1_average = AverageMeter()
     batch_time = AverageMeter()
+    target_list = []
+    pred_list = []
 
     top1_each = {i: AverageMeter() for i in  np.arange(args.topn_class)}
 
@@ -313,12 +412,15 @@ def validate(val_loader, model, criterion, epoch, classes):
 
     for i, (input, target) in enumerate(val_loader):
         t = time.time()
+        target_list.extend(list(target))
         target = target.cuda(async=True)
         input = input.cuda()
         input = torch.autograd.Variable(input)
         target_var = torch.autograd.Variable(target)
         # compute output
         output = model(input)
+
+        pred_list.extend(output.max(1)[1])
 
         loss = criterion(output, target_var)
         prec1_all  = accuracy(output.data, target, topk=(1,))[0]
@@ -346,10 +448,10 @@ def validate(val_loader, model, criterion, epoch, classes):
 
     top1_each = [top1_each[x].avg for x in top1_each]
     top1_average = np.mean(top1_each)
-    print('\n * Val Error: {loss.avg:.4g}\tVal Acc (all): {top1_all.avg:.4g}\tVal Acc (class average): {top1_average:.4g}'\
+    print('\n * Val Loss: {loss.avg:.4g}\tVal Acc (all): {top1_all.avg:.4g}\tVal Acc (class average): {top1_average:.4g}'\
             .format(loss=losses, top1_all=top1_all, top1_average=top1_average))
     print(pd.DataFrame({'class':classes, 'acc':top1_each}).T)
-    return losses.avg, top1_all.avg, top1_average, top1_each
+    return losses.avg, top1_all.avg, top1_average, top1_each, target_list, pred_list
 
 
 def accuracy(output, target, topk=(1,)):
