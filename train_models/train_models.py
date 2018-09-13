@@ -214,20 +214,20 @@ def main():
         model = models.vgg16_bn(num_classes=args.topn_class, pretrained=False)
     elif args.model == 'resnet18_pretrained_tuneall':
         model = models.resnet18(pretrained=True)
-        model.fc = nn.Linear(512, args.topn_class)  # require_grad=True by default
+        model.fc = nn.Linear(512 * 4, args.topn_class)  # require_grad=True by default
     elif args.model == 'resnet34_pretrained_tuneall':
         model = models.resnet34(pretrained=True)
-        model.fc = nn.Linear(512, args.topn_class)
+        model.fc = nn.Linear(512 * 4, args.topn_class)
     elif args.model == 'resnet18_pretrained_tunelast':
         model = models.resnet18(pretrained=True)
         for param in model.parameters():
             param.requires_grad = False
-        model.fc = nn.Linear(512, args.topn_class)  # require_grad=True by default
+        model.fc = nn.Linear(512 * 4, args.topn_class)  # require_grad=True by default
     elif args.model == 'resnet34_pretrained_tunelast':
         model = models.resnet34(pretrained=True)
         for param in model.parameters():
             param.requires_grad = False
-        model.fc = nn.Linear(512, args.topn_class)
+        model.fc = nn.Linear(512 * 4, args.topn_class)
     elif args.model == 'vgg13bn_pretrained_tuneall':
         model = models.vgg13_bn(pretrained=True)
         model.classifier = None
@@ -333,7 +333,7 @@ def main():
             for k in classes:
                 log_value('train_acc_%d' % k, train_acc_each[k], epoch)
                 log_value('val_acc_%d' % k, val_acc_each[k], epoch)
-    print 'Best accuracy: ', best_prec1
+    print('Best accuracy: ', best_prec1)
 
 def train(train_loader, model, criterion, optimizer, epoch, classes):
     """Train for one epoch on the training set"""
@@ -367,7 +367,7 @@ def train(train_loader, model, criterion, optimizer, epoch, classes):
         losses.update(loss.data[0], input.size(0))
         top1_all.update(prec1_all[0], input.size(0))
         for k in top1_each:
-            top1_each[k].update(prec1_each[k], torch.sum(target==k))
+            top1_each[k].update(prec1_each[k], torch.sum(target.eq(float(k))))
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
@@ -429,7 +429,7 @@ def validate(val_loader, model, criterion, epoch, classes):
         losses.update(loss.data[0], input.size(0))
         top1_all.update(prec1_all[0], input.size(0))
         for k in top1_each:
-            top1_each[k].update(prec1_each[k], torch.sum(target==k))
+            top1_each[k].update(prec1_each[k], torch.sum(target.eq(float(k))))
 
         # measure elapsed time
         batch_time.update(time.time() - t)
@@ -480,13 +480,13 @@ def accuracy_multi(output, target, classes, topk=(1,)):
     correct = pred.eq(target.view(1, -1).expand_as(pred))
     res_all = dict()
 
-    for c in classes:
+    for c in classes.astype(float):
         res = []
-        class_size = torch.sum(target==c)
+        class_size = torch.sum(target.eq(c))
         if class_size > 0:
             for k in topk:
-                correct_k = correct[:k, torch.nonzero(target==c)].view(-1).float().sum(0)
-                res.append(correct_k.mul_(100.0 / torch.sum(target==c)))
+                correct_k = correct[:k, torch.nonzero(target.eq(c))].view(-1).float().sum(0)
+                res.append(correct_k.mul_(100.0 / torch.sum(target.eq(c)).float()))
         else:
             res.append([None])
         res_all[c] = res
@@ -517,9 +517,9 @@ class AverageMeter(object):
     def update(self, val, n=1):
         if n > 0:
             self.val = val
-            self.sum += val * n
+            self.sum += val * float(n)
             self.count += n
-            self.avg = self.sum / self.count
+            self.avg = self.sum / float(self.count)
 
 def adjust_learning_rate(optimizer, lr, epoch, lr_decay, decay_every):
     """decay learning rate every several epochs"""
