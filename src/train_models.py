@@ -11,17 +11,16 @@ from sklearn.model_selection import train_test_split
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.nn.parallel
 import torch.backends.cudnn as cudnn
 import torchvision.transforms as transforms
 import torch.optim as optim
 from torch.autograd import Variable
 import torchvision.models as models
 import sys
-sys.path.append('../')
 
-from src.models import *
-from src.data_utils import *
+
+from models import *
+from data_utils import *
 
 # used for logging to TensorBoard
 from tensorboard_logger import configure, log_value
@@ -37,6 +36,8 @@ use_gpu = torch.cuda.is_available()
 print('GPU: ' + str(use_gpu))
 
 parser = argparse.ArgumentParser(description='Deep Neuro Morphology')
+parser.add_argument('--datapath', default='~/Dropbox/lib/deep_neuro_morpho/data',
+                    type=str, help='dataset path')
 parser.add_argument('--dataset', default='rodent_256_scale', type=str,
                     help='dataset')
 parser.add_argument('--model', default='', type=str,
@@ -131,7 +132,7 @@ def main():
         with open('../runs/%s/argparse.json'%(dir_name), 'w') as f:
             json.dump(args_dict, f)
 
-    root_dir = os.path.expanduser('~/Dropbox/lib/deep_neuro_morpho/data')
+    root_dir = args.datapath
     if args.dataset == 'rodent_256_scale':
         data_dir = 'png_mip_256_fit_2d'
     else:
@@ -148,7 +149,7 @@ def main():
         normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225])
     else:
-        normalize = transforms.Lambda(lambda x: x/255.0)
+        normalize = transforms.Lambda(lambda x: x)
 
     if args.augment:
         transform_train = transforms.Compose([
