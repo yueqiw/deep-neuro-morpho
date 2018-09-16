@@ -75,19 +75,19 @@ def SparseMerge(spatial_size=255):
         features=[]
         for idx, (img, tar) in enumerate(tbl):
             #print(np.array(img).shape) (256, 256)
-            coords = np.nonzero(np.array(img)[0:spatial_size, 0:spatial_size]) 
+            coords = np.nonzero(np.array(img)[0:spatial_size, 0:spatial_size])
             coords = torch.LongTensor(np.vstack(coords).T)
             coords = torch.cat([coords.long(), torch.LongTensor([idx]).expand([coords.size(0), 1])], 1)
             locations.append(coords)
             f = torch.ones([coords.size(0), 1])
             f = torch.cat([f, torch.ones([coords.size(0), 1])], 1)
             features.append(f)
-        return {'input': scn.InputLayerInput(torch.cat(locations,0), torch.cat(features,0)), 
+        return {'input': scn.InputLayerInput(torch.cat(locations,0), torch.cat(features,0)),
                 'target': torch.LongTensor(targets)}
     return merge
 
 
-class NeuroMorphoSparse(NeuroMorpho):
+class NeuroMorphoSparse3D(NeuroMorpho):
     """ Neuromorpho Dataset.
     Args:
         root (string): Root directory of dataset.

@@ -3,9 +3,11 @@ runs/
 data/
 data_download/
 figures/
+notebooks/
 presentations/
 example_data/
 .ipynb_checkpoints/
+separate_git_root
 
 
 # Byte-compiled / optimized / DLL files
