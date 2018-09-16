@@ -1,9 +1,10 @@
 # My gitignore
 runs/
 data/
+data_download/
 figures/
 presentations/
-test_data/
+example_data/
 .ipynb_checkpoints/
 
 
